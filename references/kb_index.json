@@ -1,0 +1,17 @@
+{
+  "attention_mechanism": [
+    "NFWGUBEM:L3"
+  ],
+  "tabular_data": [
+    "NFWGUBEM:L3"
+  ],
+  "contextual_embeddings": [
+    "NFWGUBEM:L3"
+  ],
+  "transformer_architecture": [
+    "NFWGUBEM:L3"
+  ],
+  "semi_supervised_learning": [
+    "NFWGUBEM:L2"
+  ]
+}
