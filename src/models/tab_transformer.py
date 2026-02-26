@@ -31,6 +31,9 @@ class ColumnEmbedding(nn.Module):
       - "add":    column-type embedding added element-wise (both d-dim)
       - "concat": column identifier (ℓ-dim) concatenated with class embedding
                   (d-ℓ dim), where ℓ = d/id_frac.  Paper default: id_frac=8
+
+    Optimized using a single nn.Embedding with concatenated vocabulary sizes
+    and pre-computed offsets to prevent massive kernel dispatch overhead.
     """
 
     def __init__(
@@ -45,24 +48,27 @@ class ColumnEmbedding(nn.Module):
         self.num_cols = len(num_categories_per_col)
         self.mode = col_embed_mode
 
+        # Pre-compute offsets for a single global Embedding table
+        # Each column gets (num_cat + 1) slots (index 0 is missing value)
+        offsets = []
+        current_offset = 0
+        for num_cat in num_categories_per_col:
+            offsets.append(current_offset)
+            current_offset += num_cat + 1
+        
+        self.register_buffer("offsets", torch.tensor(offsets, dtype=torch.long))
+
         if col_embed_mode == "concat":
             # Paper Section 2: e_φi(j) = [c_φi, w_φij]
             # c_φi ∈ R^ℓ (column identifier), w_φij ∈ R^{d-ℓ} (class embedding)
             self.id_dim = d_model // id_frac
             self.cls_dim = d_model - self.id_dim
+            
             self.col_id = nn.Embedding(self.num_cols, self.id_dim)
-            self.col_embeddings = nn.ModuleList([
-                nn.Embedding(num_cat + 1, self.cls_dim)
-                for num_cat in num_categories_per_col
-            ])
+            self.col_embeddings = nn.Embedding(current_offset, self.cls_dim)
         else:  # "add"
-            # Per-column embedding tables  (+1 for unknown/missing)
-            # No padding_idx: the missing-value embedding (index 0) is learnable,
-            # matching Huang et al. (2020) Section 2.
-            self.col_embeddings = nn.ModuleList([
-                nn.Embedding(num_cat + 1, d_model)
-                for num_cat in num_categories_per_col
-            ])
+            # No padding_idx: the missing-value embedding (index 0 for each col) is learnable
+            self.col_embeddings = nn.Embedding(current_offset, d_model)
             self.col_type_embed = nn.Embedding(self.num_cols, d_model)
 
     def forward(self, x_cat: torch.Tensor) -> torch.Tensor:
@@ -73,25 +79,29 @@ class ColumnEmbedding(nn.Module):
         Returns:
             (batch, num_cat_cols, d_model) embedded + positionally encoded
         """
-        col_indices = torch.arange(self.num_cols, device=x_cat.device)
+        # Apply offsets so each column hits its dedicated section in the single table
+        x_cat_offset = x_cat + self.offsets.unsqueeze(0)  # (batch, num_cols)
 
         if self.mode == "concat":
-            col_ids = self.col_id(col_indices)  # (num_cols, id_dim)
-            embeddings = []
-            for i, emb_layer in enumerate(self.col_embeddings):
-                cls_emb = emb_layer(x_cat[:, i])           # (batch, cls_dim)
-                cid = col_ids[i].unsqueeze(0).expand(x_cat.size(0), -1)  # (batch, id_dim)
-                embeddings.append(torch.cat([cid, cls_emb], dim=-1))     # (batch, d_model)
-            return torch.stack(embeddings, dim=1)  # (batch, num_cols, d_model)
+            # 1) Get class embeddings
+            cls_emb = self.col_embeddings(x_cat_offset)  # (batch, num_cols, cls_dim)
+            
+            # 2) Get column identifiers
+            col_indices = torch.arange(self.num_cols, device=x_cat.device)
+            col_ids = self.col_id(col_indices).unsqueeze(0).expand(x_cat.size(0), -1, -1)  # (batch, num_cols, id_dim)
+            
+            # 3) Concatenate
+            return torch.cat([col_ids, cls_emb], dim=-1)  # (batch, num_cols, d_model)
         else:
-            col_type = self.col_type_embed(col_indices)  # (num_cols, d_model)
-            embeddings = []
-            for i, emb_layer in enumerate(self.col_embeddings):
-                col_emb = emb_layer(x_cat[:, i])          # (batch, d_model)
-                embeddings.append(col_emb)
-            out = torch.stack(embeddings, dim=1)           # (batch, num_cols, d_model)
-            out = out + col_type.unsqueeze(0)              # broadcast
-            return out
+            # 1) Get class embeddings
+            col_emb = self.col_embeddings(x_cat_offset)  # (batch, num_cols, d_model)
+            
+            # 2) Get column types
+            col_indices = torch.arange(self.num_cols, device=x_cat.device)
+            col_type = self.col_type_embed(col_indices).unsqueeze(0)  # (1, num_cols, d_model)
+            
+            # 3) Add
+            return col_emb + col_type
 
 
 class ContinuousNormalizer(nn.Module):
@@ -145,24 +155,23 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         attn_bias: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_attn_weights: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
             x: (batch, seq_len, d_model)
-            attn_bias: optional (batch*n_heads, seq_len, seq_len) additive bias
-                       for future TopAttention extension (Phase 3).
-
-        Returns:
-            (output, attention_weights)
+            attn_bias: Optional phase 3 structural bias
+            return_attn_weights: If True, returns attention weights. Defaults to False to enable SDPA/Flash Attention.
         """
         # Pre-norm MHA
         residual = x
+        # Pre-LN: LayerNorm applied before attention
         x_norm = self.norm1(x)
         attn_out, attn_weights = self.attn(
             x_norm, x_norm, x_norm,
             attn_mask=attn_bias,
-            need_weights=True,
-            average_attn_weights=True,
+            need_weights=return_attn_weights,
+            average_attn_weights=True if return_attn_weights else False,
         )
         x = residual + attn_out
 
@@ -268,6 +277,7 @@ class TabTransformer(nn.Module):
         x_cont: Optional[torch.Tensor] = None,
         attn_bias: Optional[torch.Tensor] = None,
         return_embeddings: bool = False,
+        return_attn_weights: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
@@ -275,12 +285,13 @@ class TabTransformer(nn.Module):
             x_cont: (batch, num_cont_cols) continuous features.
             attn_bias: optional additive attention bias (for TopAttention Phase 3).
             return_embeddings: if True, also return contextual embeddings.
+            return_attn_weights: if True, store/return attention weights (disables SDPA!).
 
         Returns:
             dict with keys:
                 "logits": (batch, num_classes) raw logits
                 "embeddings": (batch, num_cat_cols, d_model) if return_embeddings
-                "attn_weights": list of (batch, num_cat_cols, num_cat_cols) per layer
+                "attn_weights": list of (batch, num_cat_cols, num_cat_cols) per layer (if computed)
         """
         # Embed categorical columns
         h = self.col_embed(x_cat)  # (batch, num_cat_cols, d_model)
@@ -288,8 +299,9 @@ class TabTransformer(nn.Module):
         # Pass through Transformer blocks
         self._attn_weights = []
         for block in self.transformer_blocks:
-            h, aw = block(h, attn_bias=attn_bias)
-            self._attn_weights.append(aw)
+            h, aw = block(h, attn_bias=attn_bias, return_attn_weights=return_attn_weights)
+            if aw is not None:
+                self._attn_weights.append(aw)
 
         # Final norm
         h = self.final_norm(h)  # (batch, num_cat_cols, d_model)

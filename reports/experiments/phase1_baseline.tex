@@ -1,0 +1,27 @@
+\subsection{Experiment: Phase I TabTransformer Baseline}
+\label{sec:exp_phase1_baseline}
+
+\textbf{Intention \& Methodology:} 
+This experiment establishes the Phase I baseline for the TabTransformer architecture on two datasets: a 50K subset of the IEEE-CIS fraud detection dataset, and a 10K SoFi sample. Our primary objective is to verify the end-to-end data processing, modeling, and reporting pipeline before introducing Phase II enhancements (such as RTD/MLM pre-training) or Phase III graph-based structural biases. The model incorporates the explicit ``concat'' column embedding strategy ($\ell=d/8$) to strictly adhere to the original TabTransformer specification \cite{huang_tabtransformer_2020}.
+
+\textbf{Implementation Details:}
+Both runs utilize the Phase I \texttt{TabTransformer} with standard hyperparameters: $d_{model}=32$, $n_{heads}=8$, $n_{layers}=6$. To bypass extreme slowdowns caused by PyTorch Apple Silicon (MPS) unoptimized SDPA math paths, attention dropout was temporarily set to $0.0$. The batch size was 256. Continuous features were standard-scaled, and categorical missing values were mapped to a learnable zero-index embedding instead of being zero-padded. 
+
+\textbf{Results (Champion vs Challenger):}
+As the inaugural run, this serves as our establishing Champion model. Performance is tracked on strictly out-of-time (temporal) test splits to prevent data leakage.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Dataset} & \textbf{Rows} & \textbf{Fraud Rate} & \textbf{ROC-AUC} & \textbf{PR-AUC} \\ \hline
+IEEE-CIS & 50,000 & 3.59\% & 0.8247 & 0.3105 \\ \hline
+SoFi & 10,000 & 5.00\% & 0.5978 & 0.0661 \\ \hline
+\end{tabular}
+\caption{Phase I TabTransformer Baseline Results}
+\label{tab:phase1_baseline}
+\end{table}
+
+\textbf{Discussion \& Literature:}
+The IEEE-CIS baseline performs reasonably well out-of-the-box, aligning with expectations for a pure tabular transformer without deep target engineering or semi-supervised pre-training. PR-AUC (0.3105) serves as our primary target metric moving forward given the class imbalance (3.59\%).
+Conversely, the SoFi dataset exhibits significant difficulty (ROC-AUC 0.5978), pointing toward noisy or entirely distinct behavior patterns that this feature set struggles to contextualize. Future experiments will introduce RTD pre-training \cite{huang_tabtransformer_2020} as a Challenger to systematically improve these bounds.
