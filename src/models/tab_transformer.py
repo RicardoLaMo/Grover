@@ -27,30 +27,43 @@ from typing import List, Optional, Dict, Tuple
 class ColumnEmbedding(nn.Module):
     """Embeds each categorical column into a shared embedding space.
 
-    Each categorical column has its own embedding table. A learned
-    column-type embedding is added so the Transformer knows *which*
-    column a token came from (analogous to segment embeddings in BERT).
+    Supports two strategies from Huang et al. (2020):
+      - "add":    column-type embedding added element-wise (both d-dim)
+      - "concat": column identifier (ℓ-dim) concatenated with class embedding
+                  (d-ℓ dim), where ℓ = d/id_frac.  Paper default: id_frac=8
     """
 
     def __init__(
         self,
         num_categories_per_col: List[int],
         d_model: int = 32,
+        col_embed_mode: str = "concat",
+        id_frac: int = 8,
     ):
         super().__init__()
         self.d_model = d_model
         self.num_cols = len(num_categories_per_col)
+        self.mode = col_embed_mode
 
-        # Per-column embedding tables  (+1 for unknown/missing)
-        # No padding_idx: the missing-value embedding (index 0) is learnable,
-        # matching Huang et al. (2020) Section 2 — improves robustness to missing data.
-        self.col_embeddings = nn.ModuleList([
-            nn.Embedding(num_cat + 1, d_model)
-            for num_cat in num_categories_per_col
-        ])
-
-        # Shared column-type positional embedding
-        self.col_type_embed = nn.Embedding(self.num_cols, d_model)
+        if col_embed_mode == "concat":
+            # Paper Section 2: e_φi(j) = [c_φi, w_φij]
+            # c_φi ∈ R^ℓ (column identifier), w_φij ∈ R^{d-ℓ} (class embedding)
+            self.id_dim = d_model // id_frac
+            self.cls_dim = d_model - self.id_dim
+            self.col_id = nn.Embedding(self.num_cols, self.id_dim)
+            self.col_embeddings = nn.ModuleList([
+                nn.Embedding(num_cat + 1, self.cls_dim)
+                for num_cat in num_categories_per_col
+            ])
+        else:  # "add"
+            # Per-column embedding tables  (+1 for unknown/missing)
+            # No padding_idx: the missing-value embedding (index 0) is learnable,
+            # matching Huang et al. (2020) Section 2.
+            self.col_embeddings = nn.ModuleList([
+                nn.Embedding(num_cat + 1, d_model)
+                for num_cat in num_categories_per_col
+            ])
+            self.col_type_embed = nn.Embedding(self.num_cols, d_model)
 
     def forward(self, x_cat: torch.Tensor) -> torch.Tensor:
         """
@@ -60,19 +73,25 @@ class ColumnEmbedding(nn.Module):
         Returns:
             (batch, num_cat_cols, d_model) embedded + positionally encoded
         """
-        batch_size = x_cat.size(0)
         col_indices = torch.arange(self.num_cols, device=x_cat.device)
-        col_type = self.col_type_embed(col_indices)  # (num_cols, d_model)
 
-        embeddings = []
-        for i, emb_layer in enumerate(self.col_embeddings):
-            col_emb = emb_layer(x_cat[:, i])          # (batch, d_model)
-            embeddings.append(col_emb)
-
-        # Stack → (batch, num_cols, d_model), add column-type PE
-        out = torch.stack(embeddings, dim=1)           # (batch, num_cols, d_model)
-        out = out + col_type.unsqueeze(0)              # broadcast
-        return out
+        if self.mode == "concat":
+            col_ids = self.col_id(col_indices)  # (num_cols, id_dim)
+            embeddings = []
+            for i, emb_layer in enumerate(self.col_embeddings):
+                cls_emb = emb_layer(x_cat[:, i])           # (batch, cls_dim)
+                cid = col_ids[i].unsqueeze(0).expand(x_cat.size(0), -1)  # (batch, id_dim)
+                embeddings.append(torch.cat([cid, cls_emb], dim=-1))     # (batch, d_model)
+            return torch.stack(embeddings, dim=1)  # (batch, num_cols, d_model)
+        else:
+            col_type = self.col_type_embed(col_indices)  # (num_cols, d_model)
+            embeddings = []
+            for i, emb_layer in enumerate(self.col_embeddings):
+                col_emb = emb_layer(x_cat[:, i])          # (batch, d_model)
+                embeddings.append(col_emb)
+            out = torch.stack(embeddings, dim=1)           # (batch, num_cols, d_model)
+            out = out + col_type.unsqueeze(0)              # broadcast
+            return out
 
 
 class ContinuousNormalizer(nn.Module):
@@ -180,6 +199,7 @@ class TabTransformer(nn.Module):
         dropout: float = 0.1,
         mlp_hidden: List[int] = None,
         num_classes: int = 1,
+        col_embed_mode: str = "concat",
     ):
         """
         Args:
@@ -192,6 +212,7 @@ class TabTransformer(nn.Module):
             dropout: Dropout rate.
             mlp_hidden: Hidden layer sizes for the classification MLP.
             num_classes: 1 for binary classification (sigmoid).
+            col_embed_mode: "concat" (paper default, ℓ=d/8) or "add".
         """
         super().__init__()
 
@@ -204,7 +225,9 @@ class TabTransformer(nn.Module):
         self.n_layers = n_layers
 
         # Categorical column embeddings
-        self.col_embed = ColumnEmbedding(num_categories_per_col, d_model)
+        self.col_embed = ColumnEmbedding(
+            num_categories_per_col, d_model, col_embed_mode=col_embed_mode
+        )
 
         # Continuous feature normalizer
         self.cont_norm = ContinuousNormalizer(num_continuous, d_model) if num_continuous > 0 else None

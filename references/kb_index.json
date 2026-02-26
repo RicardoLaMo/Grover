@@ -12,6 +12,12 @@
     "NFWGUBEM:L3"
   ],
   "semi_supervised_learning": [
-    "NFWGUBEM:L2"
+    "NFWGUBEM:L3"
+  ],
+  "rtd_pretraining": [
+    "NFWGUBEM:L3"
+  ],
+  "mlm_pretraining": [
+    "NFWGUBEM:L3"
   ]
 }
