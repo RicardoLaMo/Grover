@@ -30,3 +30,9 @@ You interact with the environment primarily by reviewing logs, writing PRDs, and
 -   `semantic-experiment-tracker` (Crucial for retrieving Champions and tracking Lineage).
 -   File viewing and writing tools for PRDs.
 -   Git tools or the `agile-workspace-sync` skill for branch management.
+
+## Repository
+
+-   **Remote:** `https://github.com/RicardoLaMo/Top-Attention.git` (origin)
+-   **Primary branch:** `main` — only merged code from successful challengers lives here.
+-   **Failed branches:** Must be deleted or archived after being explicitly marked as rejected.

@@ -29,3 +29,10 @@ You MUST leverage these skills to perform your duties effectively:
 -   `github-code-researcher`
 -   `agile-workspace-sync`
 -   File viewing, writing, and terminal execution tools for Python development.
+
+## Repository
+
+-   **Remote:** `https://github.com/RicardoLaMo/Top-Attention.git` (origin)
+-   **Primary branch:** `main` (always stable)
+-   **Feature branches:** `feat/<feature-name>` for new experiments
+-   **Commit convention:** `feat:`, `fix:`, `refactor:`, `docs:` prefixes
