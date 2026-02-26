@@ -44,3 +44,22 @@ If your discussion section introduces a new paper that isn't already in the proj
 1.  Obtain the BibTeX entry for the paper.
 2.  Append it to the main project `.bib` file (usually `references.bib` or `machine_learning.bib` in the LaTeX directory).
 3.  Ensure your `\cite{}` keys in the report match the added BibTeX keys perfectly.
+
+## PR-Triggered Auto-Update
+
+When reviewing a PR (via the `github-pr-reviewer` skill), this reporter is automatically triggered if the PR modifies ANY of:
+- `artifacts/experiment_log.jsonl`
+- Any file in `reports/experiments/`
+- PR title/description contains keywords: "experiment", "results", "paper", "agenda"
+
+**Auto-Update Workflow:**
+1. Check out the PR branch: `gh pr checkout <number>`
+2. Read the new entries in `artifacts/experiment_log.jsonl` to identify what changed.
+3. Generate or update the corresponding `.tex` fragment in `reports/experiments/`.
+4. Commit and push the `.tex` file to the same PR branch:
+   ```bash
+   git add reports/experiments/<name>.tex
+   git commit -m "docs: auto-generate LaTeX report for <experiment>"
+   git push
+   ```
+5. Post a PR comment confirming the LaTeX update was made.
