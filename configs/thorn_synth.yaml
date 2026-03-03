@@ -1,0 +1,22 @@
+name: thorn_synth_smoke
+model: thorn
+data:
+  node_mode: transactions
+  num_nodes: 512
+  num_features: 16
+  num_classes: 2
+views:
+  enable_knn: true
+  enable_time: true
+  enable_diffusion: true
+  knn_k: 10
+  time_window: 5
+  diffusion_dim: 8
+alignment:
+  enabled: true
+  method: surrogate_overlap
+train:
+  seed: 42
+  deterministic: true
+  epochs: 10
+  lr: 0.001

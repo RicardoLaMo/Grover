@@ -1,0 +1,4 @@
+interface:
+  display_name: "PS4 Project Brief"
+  short_description: "Use project brief context for PS4 lung classifier tasks."
+  default_prompt: "Use this skill to ground decisions in the PS4 project brief and stakeholder requirements."

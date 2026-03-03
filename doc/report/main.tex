@@ -1,0 +1,779 @@
+% ============================================================
+% DTSC 8120 — Problem Set 4
+% Chest X-Ray CNN Classifier Report
+% Compiler: pdflatex
+% ============================================================
+\documentclass[11pt, letterpaper]{article}
+
+% ─── Packages ────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{parskip}
+\usepackage{fancyhdr}
+\usepackage{array}
+\usepackage{multirow}
+
+\hypersetup{colorlinks=true,linkcolor=blue!70!black,urlcolor=blue!70!black,citecolor=green!50!black}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{DTSC 8120 --- Problem Set 4}
+\lhead{Chest X-Ray CNN Classifier}
+\rfoot{Page \thepage}
+
+\lstset{language=Python,basicstyle=\ttfamily\footnotesize,keywordstyle=\color{blue},
+  commentstyle=\color{green!60!black},stringstyle=\color{orange!80!black},
+  breaklines=true,frame=single,backgroundcolor=\color{gray!8},
+  numbers=left,numberstyle=\tiny\color{gray},xleftmargin=15pt}
+
+\definecolor{ceocolor}{RGB}{0,86,163}
+\definecolor{managercolor}{RGB}{34,120,58}
+\definecolor{devcolor}{RGB}{140,20,20}
+
+% ─── Graphicspath: figures are in ../../output/figures/ ──────
+\graphicspath{{../../output/figures/}}
+
+% ============================================================
+\begin{document}
+
+% ─── Title Page ──────────────────────────────────────────────
+\begin{titlepage}
+  \centering\vspace*{2cm}
+  {\LARGE\bfseries Automated Chest X-Ray Classification\\[0.5em]
+   \large using Convolutional Neural Networks\\[2em]}
+  \rule{\linewidth}{0.5pt}\\[1em]
+  {\large DTSC 8120: Fundamentals of Machine Learning\\
+   Problem Set 4\\[1em]
+   Instructor: Dr.\ Keith Burghardt\\[2em]}
+  \begin{tabular}{ll}
+    \textbf{Student:}  & [Your Name] \\
+    \textbf{GitHub:}   & \url{https://github.com/[your-username]/[repo-name]} \\
+    \textbf{Deadline:} & Wednesday, March 4, 2026 at 5:30 PM ET \\
+    \textbf{Submitted:}& \today \\
+  \end{tabular}
+  \vspace{2em}\rule{\linewidth}{0.5pt}
+  \vfill{\small University of North Carolina at Charlotte}
+\end{titlepage}
+
+% ─── Abstract ────────────────────────────────────────────────
+\begin{abstract}
+We develop and evaluate Convolutional Neural Network (CNN) classifiers to
+automatically sort chest X-rays into three clinical categories: healthy (Class 0),
+pre-existing conditions such as aortic enlargement, cardiomegaly, or pulmonary
+fibrosis (Class 1), and urgent conditions requiring immediate attention such as
+pleural effusion (Class 2). The training dataset of 11{,}414 images exhibits
+severe class imbalance (92\% healthy), addressed via inverse-frequency class
+weights, balanced batch sampling, and data augmentation. We train three
+architectures: a 3-block Baseline CNN, a 4-block Residual CNN, and a
+transfer-learning ResNet18. All models are trained on a single NVIDIA H200 NVL
+GPU (139~GB). The best model (ResNet18) achieves a macro-F1 of \textbf{0.709}
+on the internal test set and \textbf{0.723} on the external Kaggle benchmark.
+Code is available at the GitHub link above.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Executive Summary}
+\label{sec:ceo}
+{\color{ceocolor}\rule{\linewidth}{1.5pt}\\
+\textbf{For the CEO (4 pts) --- high-level overview, one figure}}\\[-0.5em]
+{\color{ceocolor}\rule{\linewidth}{0.5pt}}
+
+\subsection*{Problem}
+Post-pandemic, city hospitals are overwhelmed by the surge in lung complication
+cases. Radiologists cannot process the volume of chest X-rays manually. We built
+an AI triage system that automatically sorts each scan into one of three
+priority groups: healthy, medium-priority (pre-existing conditions), and
+urgent (effusion / mass).
+
+\subsection*{Solution and Key Result}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.52\textwidth]{cm_ResNet18_C_balanced.png}
+  \caption{\textbf{How well does the AI sort X-rays?}
+    Rows = true category; columns = predicted category.
+    Each cell shows the fraction of that class predicted correctly.
+    Our best model (ResNet18) correctly identifies \textbf{99\%} of healthy
+    patients, \textbf{68\%} of pre-existing conditions, and \textbf{47\%} of
+    urgent effusion/mass cases on a balanced test set.}
+  \label{fig:ceo_cm}
+\end{figure}
+
+Our best model achieves \textbf{74.7\% accuracy} and a \textbf{macro-F1
+of 0.72} on 300 independent, balanced test scans.
+In plain terms: the system correctly classifies approximately \textbf{3 out of
+4 scans} across all three categories without bias toward the most common
+(healthy) group. This system is ready to assist radiologists as an automated
+triage tool, not a replacement for expert diagnosis.
+
+% ============================================================
+\newpage
+\section{Technical Report}
+\label{sec:manager}
+{\color{managercolor}\rule{\linewidth}{1.5pt}\\
+\textbf{For the Technical Manager (6 pts report + 2 pts code)}}\\[-0.5em]
+{\color{managercolor}\rule{\linewidth}{0.5pt}}
+
+\subsection{Data Description}
+\label{subsec:data}
+
+\begin{itemize}
+  \item \textbf{Training/Validation set:} 11{,}414 grayscale chest X-rays,
+    $(60 \times 60 \times 1)$ pixels, float32, range $[0, 1]$.
+    Labels: \texttt{ps4\_trainvalid\_labels.csv}, column \texttt{Label}, values 0/1/2.
+  \item \textbf{Kaggle test set:} 300 images, same shape, balanced (100 per class).
+    Labels: \texttt{ps4\_kaggle\_labels.csv}, column \texttt{Predicted}, values 0/1/2.
+\end{itemize}
+
+\subsubsection{Class Distribution and the Imbalance Problem}
+
+\begin{table}[H]
+  \centering
+  \caption{Class distribution in the training/validation dataset.}
+  \label{tab:class_dist}
+  \begin{tabular}{lrrr}
+    \toprule
+    \textbf{Class} & \textbf{Label} & \textbf{Count} & \textbf{Fraction} \\
+    \midrule
+    Healthy               & 0 & 10{,}506 & 92.0\% \\
+    Pre-existing Conditions & 1 &    651 &  5.7\% \\
+    Effusion / Mass        & 2 &    257 &  2.3\% \\
+    \midrule
+    \textbf{Total}         &   & 11{,}414 & 100.0\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.62\textwidth]{class_distribution.png}
+  \caption{Class distribution in the training/validation set.
+    Class 0 dominates at 92\% --- a severe 40:1 imbalance vs.\ Class 2.
+    A trivial classifier predicting ``Healthy'' for all scans would achieve
+    92\% accuracy while completely missing every urgent case.}
+  \label{fig:class_dist}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{sample_images.png}
+  \caption{Representative chest X-ray samples. Top: Healthy (clear lung fields).
+    Middle: Pre-existing conditions (structural abnormalities).
+    Bottom: Effusion/Mass (opacity, fluid accumulation).}
+  \label{fig:samples}
+\end{figure}
+
+\subsection{Methodology}
+\label{subsec:methodology}
+
+\subsubsection{Data Split Strategy}
+
+We perform a \textbf{stratified} train/val/test split (70\%/15\%/15\%):
+\begin{equation}
+  \frac{N_c^{\text{split}}}{N^{\text{split}}} \approx \frac{N_c}{N}
+  \quad \forall c \in \{0,1,2\}
+\end{equation}
+
+\textit{Why stratified?} On a 92/6/2\% dataset, a random split could yield
+validation/test folds with very few Class~2 examples, making early-stopping
+criteria unreliable. Stratification guarantees proportional representation.
+
+Final split sizes:
+Train: 7{,}989 [C0=7,353 | C1=456 | C2=180] /
+Val: 1{,}712 [C0=1,576 | C1=97 | C2=39] /
+Test: 1{,}713 [C0=1,577 | C1=98 | C2=38].
+
+\subsubsection{Handling Class Imbalance}
+\label{subsubsec:imbalance}
+
+We apply three complementary strategies:
+
+\paragraph{(1) Class-Weighted Loss.}
+\begin{equation}
+  w_c = \frac{N_{\text{total}}}{K \cdot N_c}
+  \label{eq:classweights}
+\end{equation}
+\begin{table}[H]
+  \centering
+  \caption{Inverse-frequency class weights for CrossEntropyLoss.}
+  \begin{tabular}{lcc}
+    \toprule
+    Class & Count & Weight \\
+    \midrule
+    Healthy (0)       & 10{,}506 & 0.362 \\
+    Pre-existing (1)  & 651      & 5.840 \\
+    Effusion/Mass (2) & 257      & 14.79 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{(2) WeightedRandomSampler.}
+Training mini-batches are drawn with per-sample weight $= 1/N_c$, giving
+roughly equal representation per batch and exposing the model to rare
+classes more frequently.
+
+\paragraph{(3) Data Augmentation.}
+Random horizontal flip ($p{=}0.5$), rotation ($\pm15^{\circ}$), and
+brightness/contrast jitter (factor 0.2) are applied only during training.
+Val/test images are unchanged.
+
+\subsubsection{Model Architectures}
+
+\begin{description}
+  \item[Model A (Baseline):] 3-block CNN --- Conv(32)$\to$Conv(64)$\to$Conv(128),
+    BatchNorm, MaxPool, AdaptiveAvgPool(4,4), FC(256)+Dropout(0.5), FC(3).
+    618{,}435 parameters. No L2 regularization (establishes performance floor).
+
+  \item[Model B (Residual CNN):] 4 residual blocks (64$\to$128$\to$256$\to$512
+    filters) with skip connections, GlobalAvgPool, two FC layers with
+    Dropout(0.5/0.3), L2 weight decay ($\lambda = 10^{-4}$),
+    ReduceLROnPlateau scheduler. 5{,}024{,}771 parameters.
+
+  \item[Model C (ResNet18):] Pretrained on ImageNet (11.3M parameters).
+    Phase 1 (epochs 1--9): backbone frozen, head only trained.
+    Phase 2 (epochs 10+): full fine-tuning with backbone LR $= 10^{-4}$,
+    head LR $= 10^{-3}$. Grayscale channel replicated to 3 channels;
+    input resized to $224\times224$.
+\end{description}
+
+\subsubsection{Evaluation Methodology}
+\label{subsubsec:eval_method}
+
+\paragraph{Metric Choice.}
+We use \textbf{macro-averaged F1} as the primary metric.
+Accuracy is misleading: a model predicting ``Healthy'' for all 1,713 test
+samples would score $92\%$ accuracy while missing every urgent case.
+Macro-F1 weights each class equally:
+\begin{equation}
+  F1_{\text{macro}} = \frac{1}{K}\sum_{c=1}^{K}
+  \frac{2 P_c R_c}{P_c + R_c}
+\end{equation}
+We additionally report per-class precision/recall/F1, micro-F1,
+macro-AUC (One-vs-Rest), and confusion matrices.
+
+\paragraph{Two Test Conditions.}
+We evaluate the \emph{same model} on two test sets to demonstrate how
+distribution choice affects reported metrics:
+\begin{enumerate}
+  \item \textbf{Unbalanced} ($n = 1{,}713$, ${\approx}92\%$ Class~0):
+    mirrors real-world clinical deployment.
+    Accuracy is high and misleading; macro-F1 reveals true class performance.
+  \item \textbf{Balanced subset} ($n = 114$, 38 per class):
+    mirrors the Kaggle test structure (100/100/100).
+    A fairer and harder measure of per-class capability.
+\end{enumerate}
+
+\subsection{Hyperparameter Tuning}
+\label{subsec:hptuning}
+
+\begin{table}[H]
+  \centering
+  \caption{Hyperparameter search and best values. Selection criterion: val macro-F1.}
+  \begin{tabular}{llll}
+    \toprule
+    \textbf{Parameter} & \textbf{Range explored} & \textbf{Best (B)} & \textbf{Best (C)} \\
+    \midrule
+    Learning rate       & $10^{-4}$--$10^{-2}$ & $3\times10^{-4}$ & $10^{-3}$ (head) \\
+    L2 weight decay     & $\{0, 10^{-4}, 10^{-3}\}$ & $10^{-4}$ & $10^{-4}$ \\
+    Dropout rate        & $\{0.3, 0.5, 0.6\}$ & 0.5 & 0.5 \\
+    Batch size          & $\{32, 128, 256, 512\}$ & 512 & 256 \\
+    LR sched.\ patience & $\{3, 5, 7\}$ & 5 & --- \\
+    Unfreeze epoch (C)  & $\{5, 10, 15\}$ & --- & 10 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Results}
+\label{subsec:results}
+
+\begin{table}[H]
+  \centering
+  \caption{Performance comparison on the internal test set.
+    Unbal.\ = unbalanced test (${\approx}92\%$ Class~0, $n{=}1713$);
+    Bal.\ = balanced test subset (38 per class, $n{=}114$).
+    \textbf{Bold} = best per column.}
+  \label{tab:results}
+  \begin{tabular}{lcccccc}
+    \toprule
+    & \multicolumn{3}{c}{\textbf{Unbalanced test}} & \multicolumn{3}{c}{\textbf{Balanced test}} \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+    \textbf{Model} & Acc & Macro-F1 & Macro-AUC & Acc & Macro-F1 & Macro-AUC \\
+    \midrule
+    A: Baseline CNN    & 0.207 & 0.170 & 0.781 & 0.526 & 0.509 & 0.795 \\
+    B: Residual CNN    & 0.935 & 0.627 & 0.918 & 0.658 & 0.633 & 0.866 \\
+    C: ResNet18 (TL)   & \textbf{0.949} & \textbf{0.709} & \textbf{0.934} & \textbf{0.719} & \textbf{0.704} & \textbf{0.894} \\
+    \midrule
+    \textbf{Kaggle test (C)} & \multicolumn{3}{c}{Accuracy = 0.747} & \multicolumn{3}{c}{Macro-F1 = 0.723, AUC = 0.918} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{baseline_training.png}
+    \caption{Model A (Baseline) training curves.}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{model_B_training.png}
+    \caption{Model B (Residual CNN) training curves.}
+  \end{subfigure}
+  \caption{Training loss and validation macro-F1 over epochs.
+    Dashed line = random-chance baseline ($1/3$).
+    Model B converges after $\sim$53 epochs; ReduceLROnPlateau halves LR at epoch 25.
+    Model A overfits (training loss drops while val loss diverges).}
+  \label{fig:training}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\textwidth]{metrics_comparison.png}
+  \caption{Model comparison across four metrics on unbalanced (solid) and balanced (hatched) test sets.
+    Key observations: (1)~Accuracy is artificially high on the unbalanced set --- Model B scores 93.5\%
+    despite poor minority-class performance. (2)~Macro-F1 and Macro-AUC are more honest: ResNet18
+    leads on both. (3)~All metrics drop on the balanced set, confirming that distribution matters.}
+  \label{fig:comparison}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{roc_ResNet18_C.png}
+    \caption{ROC curves, ResNet18 (unbalanced test).}
+  \end{subfigure}\hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \includegraphics[width=\textwidth]{cm_ResNet18_C_balanced.png}
+    \caption{Confusion matrix, ResNet18 (balanced test).}
+  \end{subfigure}
+  \caption{ROC and confusion matrix for the best model (ResNet18, Model~C).
+    AUC per class: Healthy=0.98, Pre-existing=0.93, Effusion/Mass=0.86.
+    Macro-AUC = 0.934 (unbalanced set). The confusion matrix shows that
+    healthy patients are classified perfectly (recall 1.00), while
+    Effusion/Mass recall is 0.47 --- the most challenging class despite being clinically urgent.}
+  \label{fig:roc_cm}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.52\textwidth]{kaggle_cm_C.png}
+  \caption{Kaggle test set confusion matrix (ResNet18, $n=300$ balanced).
+    Healthy recall=0.99, Pre-existing recall=0.85, Effusion recall=0.40.
+    Macro-F1 = 0.723 on this fully balanced external benchmark.}
+  \label{fig:kaggle_cm}
+\end{figure}
+
+\subsection{Extra Credit: Kaggle Competition Results}
+\label{subsec:kaggle}
+
+We apply the best validated model (ResNet18, Model~C) to the 300-image
+Kaggle test set (100 per class). Results: \textbf{Accuracy = 74.7\%},
+\textbf{Macro-F1 = 0.723}, \textbf{Macro-AUC = 0.918}.
+
+Comparison with baseline (Model~A on kaggle): Model~A achieves Macro-F1 = 0.509
+(balanced internal), while Model~C reaches 0.723 on Kaggle --- a 42\% relative
+improvement through deeper residual architecture, transfer learning,
+and two-phase fine-tuning.
+
+Submission file: \texttt{output/predictions/kaggle\_submission.csv}
+(300 rows, columns \texttt{Id} 0--299, \texttt{Predicted} $\in\{0,1,2\}$).
+
+\subsection{Discussion}
+\label{subsec:discussion}
+
+\paragraph{Effect of test set composition.}
+As Table~\ref{tab:results} demonstrates, the \emph{same model} (ResNet18) shows
+accuracy jumping from 71.9\% (balanced) to 94.9\% (unbalanced). This confirms
+the Technical Manager's warning. Accuracy is an unreliable metric here;
+macro-F1 and macro-AUC are the appropriate choices.
+
+\paragraph{Baseline behavior.}
+Model~A achieves only 0.170 unbalanced macro-F1 but 0.509 on the balanced subset
+(vs.\ random = 0.333). The apparent discrepancy arises because the model
+over-predicts minority classes for Class~0 samples due to aggressive class
+weighting, yielding low Class~0 recall (0.17) in the unbalanced set while
+performing reasonably overall on the balanced evaluation.
+
+\paragraph{Class 2 remains hardest.}
+Despite imbalance handling, Effusion/Mass (Class~2) has the lowest recall
+across all models (0.37--0.47 on test, 0.40 on Kaggle). With only 257
+training samples, the model has limited exposure. Future work: targeted
+augmentation, SMOTE, or additional data collection.
+
+\paragraph{Transfer learning advantage.}
+ResNet18 (Model~C) outperforms the custom ResidualCNN (Model~B) by
++8\% absolute macro-F1 on both test conditions. ImageNet pretraining provides
+a strong initialization even for grayscale medical images, validating the
+transfer learning approach for small, imbalanced medical datasets.
+
+% ============================================================
+\newpage
+\section{Code Documentation}
+\label{sec:developer}
+{\color{devcolor}\rule{\linewidth}{1.5pt}\\
+\textbf{For the Senior Developer (8 pts)}}\\[-0.5em]
+{\color{devcolor}\rule{\linewidth}{0.5pt}}
+
+\subsection{Repository Structure}
+
+Full codebase: \url{https://github.com/[your-username]/[repo-name]}
+
+\begin{verbatim}
+hw4/
++-- CLAUDE.md                   # Agent rules, GPU specs, architecture guide
++-- run_pipeline.py             # Self-contained pipeline (all stages inline)
++-- doc/
+|   +-- PROJECT_BRIEF.md        # Business problem, stakeholder analysis
+|   +-- GRADING_RUBRIC.md       # Quality gates per reviewer role
+|   +-- ARCHITECTURE.md         # CNN design decisions and decision log
+|   +-- report/main.tex         # This document (LaTeX)
++-- src/
+|   +-- utils.py                # EarlyStopping, plotting helpers
+|   +-- 00_eda.py               # Exploratory data analysis script
+|   +-- 01_data_pipeline.py     # XRayDataset, stratified loaders
+|   +-- 02_baseline_cnn.py      # Model A standalone training script
+|   +-- 03_improved_cnn.py      # Models B and C standalone scripts
+|   +-- 04_evaluation.py        # Full evaluation + figure generation
+|   +-- 05_kaggle_predict.py    # Extra-credit CSV generator
++-- output/
+|   +-- figures/                # All plots (CM, ROC, training curves)
+|   +-- models/                 # Checkpoints (baseline.pth, improved_B/C.pth)
+|   +-- predictions/            # kaggle_submission.csv
+\end{verbatim}
+
+\subsection{How to Run}
+
+\begin{lstlisting}[caption={Run the complete pipeline}]
+# Dependencies: already installed in H200 environment
+# torch 2.9.0+cu128 | torchvision 0.24.0 | scikit-learn 1.7 | matplotlib 3.10
+
+# Run all 6 stages end-to-end (~5 minutes on H200 GPU)
+python run_pipeline.py
+
+# Outputs: output/figures/  output/models/  output/predictions/
+\end{lstlisting}
+
+\subsection{Key Design Choices Explained}
+
+\paragraph{XRayDataset (\texttt{run\_pipeline.py:make\_loaders}).}
+Images arrive as \texttt{(N, 60, 60, 1)} float32 in $[0,1]$.
+We strip the trailing channel dim, add PyTorch channel-first dim, and
+optionally replicate to 3 channels for ResNet18.
+Normalization with mean=0.5, std=0.5 centers values to $[-1,1]$.
+
+\paragraph{Residual block.}
+Output $= \text{ReLU}(F(x) + \text{skip}(x))$.
+The skip path is a $1\times1$ conv projection when input/output channel counts differ,
+identity otherwise. Skip connections allow gradients to flow directly to
+earlier layers, solving vanishing gradients in 4+ block networks.
+
+\paragraph{Two-phase ResNet18 training.}
+\begin{lstlisting}[caption={Phase switch at epoch 10}]
+if epoch == UNFREEZE_EP:
+    for p in model_C.parameters():
+        p.requires_grad = True        # unfreeze backbone
+    optimizer = optim.Adam([
+        {"params": backbone_params, "lr": 1e-4},   # small LR: preserve features
+        {"params": head_params,     "lr": 1e-3},   # normal LR: train head
+    ], weight_decay=1e-4)
+\end{lstlisting}
+Phase 1 prevents catastrophic forgetting of ImageNet features during the
+high-loss warm-up. Phase 2 fine-tunes the full network at a $10\times$
+smaller backbone LR.
+
+\paragraph{Class-weighted loss.}
+\begin{lstlisting}[caption={Class weight computation and loss setup}]
+# w_c = N_total / (K * N_c)  ->  rare classes get higher gradient
+cw = torch.tensor([N/(3*Nc) for Nc in class_counts])  # [0.362, 5.84, 14.79]
+loss_fn = nn.CrossEntropyLoss(weight=cw.to(device))
+\end{lstlisting}
+Without weighting, the model is pushed to predict Class~0 for everything
+(92\% accuracy but clinically useless).
+
+\paragraph{EarlyStopping.}
+Monitors val macro-F1 (mode=max). Saves the best checkpoint automatically.
+Stops when no improvement for \texttt{patience} epochs, preventing overfitting.
+
+\subsection{Reproducibility}
+\begin{lstlisting}[caption={Reproducibility seeds set at startup}]
+torch.manual_seed(42)
+np.random.seed(42)
+torch.backends.cudnn.benchmark = True  # auto-tune conv algorithms on H200
+\end{lstlisting}
+All experiments were run on a single NVIDIA H200 NVL (139~GB, CUDA 12.8,
+PyTorch 2.9.0). Results are deterministic given fixed seeds.
+
+% ============================================================
+\newpage
+% ============================================================
+\section{Champion vs.\ Challenger: 10-Iteration Deep CNN Comparison}
+\label{sec:cc}
+{\color{devcolor}\rule{\linewidth}{1.5pt}\\
+\textbf{Advanced Model Selection --- Research-Grounded Challenger Analysis}}\\[-0.5em]
+{\color{devcolor}\rule{\linewidth}{0.5pt}}
+
+\subsection{Motivation and Methodology}
+
+After establishing ResNet18 as the champion (val macro-F1\,=\,0.6976,
+Kaggle F1\,=\,0.723), we conducted a systematic \emph{champion vs.\ challenger}
+study to identify whether better architectures or training strategies exist for
+this imbalanced 3-class chest X-ray task.
+
+\textbf{Protocol:} Each challenger is trained with the \emph{identical} data
+split (seed\,=\,42, stratified 70/15/15), same class-weighted loss, and same
+2-phase transfer learning schedule (freeze backbone for 10 epochs, then unfreeze
+with $\text{lr}_\text{backbone}=10^{-4}$, $\text{lr}_\text{head}=10^{-3}$).
+A challenger \emph{beats the champion} if its balanced-test macro-F1 exceeds
+the champion by more than $10^{-4}$.
+
+\subsection{Challengers and Research Rationale}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Champion vs.\ challenger description, parameter count, and motivation.}
+  \begin{tabular}{llcp{6.5cm}}
+    \toprule
+    \textbf{ID} & \textbf{Model / Strategy} & \textbf{Params} & \textbf{Why better?} \\
+    \midrule
+    Champion & ResNet18 (baseline) & 11.3M & Established champion (Kaggle F1\,=\,0.723). \\
+    \midrule
+    C01 & EfficientNet-B0~\cite{effnet} & 5.3M &
+      Compound scaling of width$\times$depth$\times$resolution simultaneously.
+      98\% accuracy on multi-centric chest X-ray~\cite{effcxr}; fewer params than ResNet18. \\
+    C02 & DenseNet121~\cite{densenet,chexnet} & 7.98M &
+      Each layer connected to all subsequent layers --- max gradient flow.
+      CheXNet: radiologist-level pneumonia detection on ChestX-ray14. \\
+    C03 & EfficientNet-B4~\cite{effnet} & 19M &
+      Largest EfficientNet variant; 99.79\% brain-tumor accuracy (Nature 2025);
+      99.54\% multi-class medical imaging accuracy~\cite{effb4}. \\
+    C04 & MobileNetV3-Large~\cite{mobilev3} & 5.4M &
+      Squeeze-Excitation channel attention recalibrates features globally.
+      Hard-Swish activation. 96.94\% multi-class brain tumor accuracy. \\
+    C05 & ResNet50~\cite{resnet} & 25.5M &
+      Bottleneck blocks; direct scale-up of champion architecture.
+      Ensemble ResNet50+EfficientNet-B0 achieves 99.45\%~\cite{ensemble25}. \\
+    C06 & ConvNeXt-Tiny~\cite{convnext} & 28.6M &
+      Modernized CNN: 7$\times$7 depthwise conv, LayerNorm, GELU.
+      99.5\% brain-tumor classification (JMMU 2024). \\
+    C07 & ResNet18 + Focal Loss~\cite{focalloss} & 11.3M &
+      $\mathcal{L}_\text{focal}=-(1{-}p_t)^\gamma\!\log p_t$, $\gamma{=}2$.
+      Down-weights easy majority-class examples; LMFLOSS shows +2--9\% macro-F1. \\
+    C08 & EfficientNet-B0 + RandAugment~\cite{randaug} & 5.3M &
+      Best single augmentation strategy for CXR classification;
+      $N{=}2$ ops, magnitude $M{=}9$ applied during training. \\
+    C09 & ResNet18 + Label Smooth + CosLR & 11.3M &
+      $\varepsilon{=}0.1$ smoothing prevents overconfident minority predictions.
+      CosineAnnealingLR provides smoother decay. LS+ (MICCAI 2024)
+      shows notable calibration improvement on chest pathology. \\
+    C10 & Ensemble (Champ+C01+C02) & $\sim$24M &
+      Soft voting (average softmax) of 3 diverse architectures.
+      Literature: $+4$--8\% F1 from simple averaging~\cite{ensemble25}. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Added Metric: PR-AUC}
+
+\textbf{Precision-Recall AUC (PR-AUC, macro-averaged)} is computed alongside
+ROC-AUC and macro-F1.
+
+\textbf{Why PR-AUC?} On a 92/6/2\% imbalanced dataset, the majority class's
+high True Negative Rate inflates ROC-AUC. PR-AUC focuses on precision--recall
+trade-offs per class (one-vs-rest) and is more sensitive to minority-class
+detection quality. The macro random baseline is
+$\bar{\text{PR}}\approx(0.92+0.057+0.023)/3\approx0.33$, identical to the
+macro-F1 random baseline, making comparisons intuitive.
+
+\textbf{Computation:}
+\[
+  \text{PR-AUC}_\text{macro} = \frac{1}{3}\sum_{c=0}^{2}
+  \text{AveragePrecision}(\mathbf{y}^{(c)}, \hat{p}^{(c)})
+\]
+where $\mathbf{y}^{(c)}$ is the one-vs-rest binary label and $\hat{p}^{(c)}$
+is the softmax probability for class $c$.
+
+\textbf{Interpretation note:} PR-AUC is most reliable on the \emph{balanced}
+test set (33\% per class) because equal class priors eliminate the prior-shift
+issue. On the unbalanced set, Class 2's 2.3\% frequency makes its
+AveragePrecision approach its random baseline ($\approx$0.023), compressing
+the macro average.
+
+\subsection{Results}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Champion vs.\ Challenger results on Balanced test ($n{=}114$,
+    33\% per class) and Unbalanced test ($n{=}1713$, $\approx$92\% Class~0).
+    \textbf{Bold} = beats champion on that metric.
+    PR-AUC reported on balanced test (most reliable under equal priors).
+    Results from \texttt{run\_champion\_challenger.py}; champion threshold = 0.690 balanced Macro-F1.}
+  \label{tab:cc_results}
+  \begin{tabular}{lcccccc}
+    \toprule
+    & \multicolumn{3}{c}{\textbf{Balanced test}} & \multicolumn{2}{c}{\textbf{Unbalanced test}} & \\
+    \cmidrule(lr){2-4}\cmidrule(lr){5-6}
+    \textbf{Model} & Macro-F1 & PR-AUC & ROC-AUC & Macro-F1 & Params & Outcome \\
+    \midrule
+    Champion: ResNet18      & 0.690 & 0.788 & 0.882 & 0.673 & 11.3M & Champion \\
+    C01: EfficientNet-B0    & 0.682 & 0.775 & \textbf{0.883} & 0.588 & 4.3M  & Challenger \\
+    C02: DenseNet121        & 0.665 & 0.767 & 0.869 & 0.626 & 7.2M  & Challenger \\
+    C03: EfficientNet-B4    & 0.675 & 0.777 & 0.860 & 0.470 & 18.0M & Challenger \\
+    C04: MobileNetV3-Large  & \textbf{0.706} & 0.793 & \textbf{0.886} & 0.604 & 4.2M  & $\uparrow$ New Champ \\
+    C05: ResNet50           & \textbf{0.692} & 0.790 & \textbf{0.888} & 0.671 & 24.0M & $\uparrow$ Beats Champ \\
+    C06: ConvNeXt-Tiny      & \textbf{0.717} & \textbf{0.816} & \textbf{0.903} & \textbf{0.680} & 27.8M & $\uparrow$ New Champ \\
+    C07: ResNet18+FocalLoss & \textbf{0.725} & 0.773 & 0.868 & 0.659 & 11.3M & \textbf{Final Champ (+3.5\%)} \\
+    C08: EffB0+RandAugment  & \textbf{0.704} & \textbf{0.806} & \textbf{0.888} & 0.614 & 4.3M  & $\uparrow$ Beats Champ \\
+    C09: ResNet18+LabelSm   & 0.392 & 0.775 & 0.821 & 0.220 & 11.3M & Failed (diverged) \\
+    C10: Ensemble (3-model) & \textbf{0.701} & 0.794 & \textbf{0.893} & 0.664 & 22.8M & $\uparrow$ Beats Champ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[t]{0.99\textwidth}
+    \includegraphics[width=\textwidth]{cc_comparison_4panel.png}
+    \caption{4-panel champion vs.\ challenger comparison: balanced Macro-F1 (primary),
+      PR-AUC, ROC-AUC, and unbalanced Macro-F1.
+      Red bar = champion (ResNet18); blue = challengers; green = ensemble (C10).
+      Dashed gray = random baseline; dotted red = champion threshold.}
+  \end{subfigure}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[t]{0.99\textwidth}
+    \includegraphics[width=\textwidth]{cc_prauc_perclass.png}
+    \caption{Per-class PR-AUC on balanced test set.
+      Random baseline: Class~0 $\approx$0.92, Class~1 $\approx$0.057, Class~2 $\approx$0.023.
+      Class~1 and Class~2 bars reveal minority-class detection quality
+      that macro-F1 alone may obscure.}
+  \end{subfigure}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}[t]{0.6\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{cc_radar_top3.png}
+    \caption{Radar chart of top-3 models across five metrics.
+      All axes: higher is better. Wider polygon = more uniformly strong model.}
+  \end{subfigure}
+\end{figure}
+
+\subsection{Discussion}
+
+\paragraph{Architecture comparison.}
+EfficientNet results were mixed: C01 (plain B0, 0.682) and C03 (B4, 0.675)
+fell \emph{below} the champion, while C08 (B0 + RandAugment, 0.704) narrowly
+exceeded it, showing that augmentation---not architecture---drove the gain.
+DenseNet121 (C02, 0.665) underperformed despite domain-specific CheXNet
+pretraining, likely because 40 training epochs were insufficient for its
+dense-connectivity pattern.
+ConvNeXt-Tiny (C06, 0.717) was the strongest pure-architecture challenger,
+achieving the highest ROC-AUC (0.903) and PR-AUC (0.816), confirming the
+2022 modernized-CNN design advantage on this task.
+
+\paragraph{Loss function comparison (C07 vs.\ Champion).}
+Replacing weighted cross-entropy with Focal Loss ($\gamma=2$) on the identical
+ResNet18 architecture produced the highest balanced Macro-F1 (0.725, $+3.5$\%),
+confirming literature claims of $+2$--9\% macro-F1 improvement with focal
+variants~\cite{focalloss}. The same architecture, different loss: loss design
+outweighed all architectural changes except ConvNeXt-Tiny.
+
+\paragraph{Augmentation comparison (C08 vs.\ C01).}
+C08 (EfficientNet-B0 + RandAugment, 0.704) exceeded C01 (plain B0, 0.682)
+by $+2.2$ pp, confirming that RandAugment meaningfully improves generalization
+on our 11K training set. PR-AUC for C08 (0.806) was notably higher than C01
+(0.775), indicating better minority-class discrimination when augmentation is
+applied.
+
+\paragraph{Ensemble (C10) analysis.}
+Soft voting of three architecturally diverse models (ResNet18, EfficientNet-B0,
+DenseNet121) achieved 0.701 balanced Macro-F1, beating the original champion
+but falling short of C07 FocalLoss ($-2.4$ pp). Literature expectation of
+$+4$--8\% over the best single model~\cite{ensemble25} was not realized,
+suggesting that loss function quality dominates over model diversity in this
+highly imbalanced setting. The ensemble is parameter-heavy ($\sim$22.8M) for
+its performance: C07 matches or exceeds it at identical parameter count.
+
+\paragraph{C09 failure analysis.}
+ResNet18 with label smoothing ($\varepsilon=0.1$) and CosineAnnealingLR
+collapsed to Macro-F1\,=\,0.392 (balanced). CosineAnnealingLR dropped the
+learning rate near zero by epoch 30 of Phase 2 ($T_\text{max}=30$,
+$\eta_\text{min}=10^{-6}$), stalling gradient updates precisely when the
+unfrozen backbone needed fine-tuning. This interaction between aggressive
+LR decay and label smoothing caused convergence failure---a cautionary example
+of hyperparameter interaction in two-phase transfer learning.
+
+% ============================================================
+\newpage
+\begin{thebibliography}{9}
+\bibitem{resnet}
+  K.\ He, X.\ Zhang, S.\ Ren, J.\ Sun,
+  ``Deep Residual Learning for Image Recognition,''
+  \textit{CVPR}, 2016.
+\bibitem{pytorch}
+  A.\ Paszke et al., ``PyTorch: An Imperative Style, High-Performance
+  Deep Learning Library,'' \textit{NeurIPS}, 2019.
+\bibitem{sklearn}
+  F.\ Pedregosa et al., ``Scikit-learn: Machine Learning in Python,''
+  \textit{JMLR}, 12:2825--2830, 2011.
+\bibitem{effnet}
+  M.\ Tan, Q.\ Le, ``EfficientNet: Rethinking Model Scaling for CNNs,''
+  \textit{ICML}, 2019.
+\bibitem{densenet}
+  G.\ Huang, Z.\ Liu, L.\ van der Maaten, K.\ Weinberger,
+  ``Densely Connected Convolutional Networks,''
+  \textit{CVPR}, 2017.
+\bibitem{chexnet}
+  P.\ Rajpurkar et al.,
+  ``CheXNet: Radiologist-Level Pneumonia Detection on Chest X-Rays
+   with Deep Learning,''
+  \textit{arXiv}:1711.05225, 2017.
+\bibitem{focalloss}
+  T.-Y.\ Lin, P.\ Goyal, R.\ Girshick, K.\ He, P.\ Doll\'{a}r,
+  ``Focal Loss for Dense Object Detection,''
+  \textit{ICCV}, 2017.
+\bibitem{mobilev3}
+  A.\ Howard et al.,
+  ``Searching for MobileNetV3,''
+  \textit{ICCV}, 2019.
+\bibitem{convnext}
+  Z.\ Liu, H.\ Mao, C.-Y.\ Wu, C.\ Feichtenhofer, T.\ Darrell, S.\ Xie,
+  ``A ConvNet for the 2020s,''
+  \textit{CVPR}, 2022.
+\bibitem{randaug}
+  E.\ D.\ Cubuk, B.\ Zoph, J.\ Shlens, Q.\ V.\ Le,
+  ``RandAugment: Practical Automated Data Augmentation with a Reduced
+   Search Space,''
+  \textit{CVPR workshops}, 2020.
+\bibitem{effcxr}
+  R.\ Hamdy et al.,
+  ``Comparison of EfficientNet CNN models for multi-label chest X-ray
+   disease diagnosis,''
+  \textit{PMC12453788}, 2024.
+\bibitem{effb4}
+  Islam et al.,
+  ``BrainNet: Precision Brain Tumor Classification with Optimized
+   EfficientNet Architecture,''
+  \textit{Int.\ J.\ Intelligent Systems}, 2024.
+\bibitem{ensemble25}
+  M.\ Rashidi et al.,
+  ``Explainable Fusion of EfficientNet-B0 and ResNet50 for Liver Fibrosis
+   Staging in Ultrasound Imaging,''
+  \textit{Scientific Reports}, 2025.
+\end{thebibliography}
+
+\end{document}

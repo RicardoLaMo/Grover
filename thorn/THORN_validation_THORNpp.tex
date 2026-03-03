@@ -1,0 +1,279 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath, amssymb, amsthm, mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\usepackage{xcolor}
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  showstringspaces=false,
+  tabsize=2
+}
+
+\geometry{margin=1in}
+
+\title{Mathematical Validation and Critique of THORN\\
+\large Transport-aligned Heterogeneous Observer-Routed Neighborhood Attention (THORN++)}
+\author{}
+\date{}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\begin{document}
+\maketitle
+
+\section{Preliminaries and Notation}
+
+Let $G^{(m)}=(V,E^{(m)})$ denote the $m$-th neighborhood view over a common node set $V$ (e.g., $m\in\{\text{kNN},\text{time},\text{diff}\}$).
+For each view, let $A^{(m)}\in\mathbb{R}_{\ge 0}^{|V|\times |V|}$ be a (possibly weighted) adjacency operator.
+We write $i$ for the \emph{central} node and $j$ for a \emph{neighbor} of $i$; attention weights are normalized over $j$:
+\[
+\alpha_{ij}^{(h)} \propto \exp(\cdot),\qquad \sum_{j\in\mathcal{N}(i)}\alpha_{ij}^{(h)}=1.
+\]
+In implementation (PyTorch Geometric convention), we store directed edges as $(j\to i)$ in \texttt{edge\_index}, so \texttt{edge\_index[0]} is $j$ (source/neighbor) and \texttt{edge\_index[1]} is $i$ (target/central). This matches the mathematical direction ``gather from $j$ into $i$.''
+
+The router produces routing probabilities over views for each node-head pair:
+\[
+\pi_{i,h,m}=\frac{\exp(\ell_{i,h,m})}{\sum_{m'}\exp(\ell_{i,h,m'})},
+\qquad \sum_m \pi_{i,h,m}=1,\quad \pi_{i,h,m}\ge 0.
+\]
+
+\paragraph{Density-invariant view mixing.}
+Multi-view neighborhoods can differ drastically in degree statistics. To prevent the router from learning a spurious preference for sparse views (because attention mass is less diluted), we mix \emph{degree-normalized} view operators with an explicit clamp for numerical safety:
+\[
+\bar\deg_i^{(m)}=\max\!\big(\deg_i^{(m)},\epsilon_{\deg}\big),
+\qquad
+\deg_i^{(m)}=\sum_{j} A_{ij}^{(m)},
+\qquad
+\hat A_{ij}^{(m)} \;=\; \frac{A_{ij}^{(m)}}{\sqrt{\bar\deg_i^{(m)}\,\bar\deg_j^{(m)}}}.
+\]
+The routed edge mass used by head $h$ at node $i$ is then
+\begin{equation}
+\label{eq:routedA}
+\tilde A_{ij}^{(i,h)} \;=\; \sum_m \pi_{i,h,m}\,\hat A_{ij}^{(m)}.
+\end{equation}
+
+\begin{remark}[Implementation reminder: correct direction, stable normalization, and self-loop policy]
+In PyTorch Geometric, \texttt{edge\_index[0]} denotes the \emph{source} (neighbor) $j$ and \texttt{edge\_index[1]} denotes the \emph{target} (central) $i$. Since THORN aggregates $j\!\to\! i$, both degree computation (for $\deg_i^{(m)}$) and neighborhood-softmax must use the target index $i$.
+
+Self-loops should be enforced \emph{before} constructing $E_{\mathrm{union}}$ and any aligned edge-feature tensor $e_{ij}$. Adding self-loops inside a layer is safe only if edge features are extended consistently; otherwise, \texttt{edge\_index} and \texttt{edge\_feat} become misaligned.
+\begin{lstlisting}[language=Python]
+# Convention: edge_index stores directed edges (j -> i)
+j, i = edge_index[0], edge_index[1]
+
+# Degree for normalization: deg_i = sum_{j:(j->i)} A_ij
+deg = torch.zeros(N, device=edge_weight.device, dtype=edge_weight.dtype)
+deg.scatter_add_(0, i, edge_weight)
+deg = deg.clamp_min(eps_deg)          # eps_deg ~ 1e-12 (fp32) or 1e-6 (fp16)
+inv_sqrt = deg.rsqrt()                # stable 1/sqrt(deg)
+edge_weight_hat = edge_weight * inv_sqrt[i] * inv_sqrt[j]  # \hat A_ij
+\end{lstlisting}
+\end{remark}
+
+\paragraph{Log-barrier (soft) masking.}
+THORN applies a differentiable relaxation of hard attention masks via
+\begin{equation}
+\label{eq:logbarrier}
+\alpha_{ij}^{(h)} \;=\; \mathrm{softmax}_{j}\Big( s_{ij}^{(h)} + b_{ij}^{(h)} + \log(\tilde A_{ij}^{(i,h)}+\epsilon)\Big),
+\end{equation}
+where $b_{ij}^{(h)}$ is an optional edge bias computed from edge features and $\epsilon>0$ is a numerical stabilizer.
+
+\begin{remark}[Implementation reminder: attention direction and log-barrier masking]
+On a union edge list with PyG orientation $(j\to i)$, compute $q_i$ from the target index and $(k_j,v_j)$ from the source index, normalize over neighbors of each target $i$, then scatter-add messages to $i$.
+\begin{lstlisting}[language=Python]
+# Q, K, V: [N, H, d]; edge_index_u: [2, E] stores (j -> i)
+j, i = edge_index_u[0], edge_index_u[1]
+
+scores = (Q[i] * K[j]).sum(-1) / math.sqrt(d)    # [E, H] : s_ij^(h)
+scores = scores + edge_bias                       # b_ij^(h), shape [E, H]
+
+log_mask = (A_tilde + eps).log()                  # log(\tilde A_ij + eps), [E, H] or [E, 1]
+logits = scores + log_mask
+
+attn = softmax_over_neighbors(logits, i)          # softmax over j for each fixed i
+msg  = attn.unsqueeze(-1) * V[j]                  # [E, H, d]
+out  = scatter_add(msg, i, dim=0, dim_size=N)     # aggregate into node i
+\end{lstlisting}
+\end{remark}
+
+\section{Pillar I: Validity of Log-Barrier Masking}
+
+\begin{proposition}[Continuous relaxation of sparse masking]
+\label{prop:masking}
+Assume $\tilde A_{ij}^{(i,h)}\in[0,1]$ and $\epsilon\downarrow 0$. Then \eqref{eq:logbarrier} is a continuous relaxation of discrete sparse attention:
+if $\tilde A_{ij}^{(i,h)}=0$ then $\alpha_{ij}^{(h)}\to 0$, while if $\tilde A_{ij}^{(i,h)}>0$ then $\alpha_{ij}^{(h)}$ is well-defined and differentiable with respect to $\tilde A_{ij}^{(i,h)}$.
+\end{proposition}
+
+\begin{proof}
+If $\tilde A_{ij}^{(i,h)}\to 0$, then $\log(\tilde A_{ij}^{(i,h)}+\epsilon)\to -\infty$, so $\exp(s_{ij}^{(h)}+b_{ij}^{(h)}+\log(\tilde A_{ij}^{(i,h)}+\epsilon))\to 0$ and hence the softmax assigns vanishing mass to $(i,j)$.
+If $\tilde A_{ij}^{(i,h)}>0$, then $\log(\tilde A_{ij}^{(i,h)}+\epsilon)$ is finite and smooth; since softmax is smooth, $\alpha_{ij}^{(h)}$ is differentiable in $\tilde A_{ij}^{(i,h)}$ and therefore in router logits $\ell_{i,h,m}$ through \eqref{eq:routedA}.
+\end{proof}
+
+\paragraph{Relation to prior work.}
+Graph Attention Networks enforce sparsity by restricting $j\in\mathcal{N}(i)$ via hard indexing or binary masks; Transformers commonly implement masking by adding $-\infty$ to disallowed logits. The log-barrier formulation retains the semantics of hard masking while remaining differentiable with respect to routing and view mixing.
+
+\section{Pillar II: Strict Generalization (Subsumption) of Existing Architectures}
+
+\begin{theorem}[THORN strictly subsumes standard graph-attention and graph-transformer baselines]
+\label{thm:subsumption}
+Under suitable parameter settings, THORN reduces to (i) multi-head neighborhood graph attention, (ii) fully-connected transformer attention with structural biases, and (iii) Mixture-of-Experts (MoE) routing as special cases.
+\end{theorem}
+
+\begin{proof}[Sketch via reductions]
+\textbf{(i) GAT reduction.} Let $M=1$ (single view), set $\pi_{i,h,1}=1$ for all $(i,h)$, and set $b_{ij}^{(h)}=0$. Then $\tilde A_{ij}^{(i,h)}=\hat A_{ij}^{(1)}$ and \eqref{eq:logbarrier} implements masked neighborhood attention with multi-head aggregation.
+
+\textbf{(ii) Graphormer reduction.} Let $A^{(1)}$ be fully connected so $\tilde A_{ij}^{(i,h)}\equiv 1$ and the log term is constant. If $b_{ij}^{(h)}$ encodes shortest-path distance or other structural encodings, \eqref{eq:logbarrier} reduces to transformer attention with graph-structural biases.
+
+\textbf{(iii) MoE reduction.} Replace graph ``views'' by independent expert modules and interpret $\pi_{i,h,m}$ as the expert gating distribution. Then \eqref{eq:routedA} becomes mixture-of-experts selection.
+\end{proof}
+
+\section{Pillar III: Differentiability of Transport-Aligned Routing}
+
+Let $D_{i,m}$ denote a (precomputed or slowly updated) discordance cost of view $m$ relative to a fused/consensus structure at node $i$ (e.g., ego-network FGW discrepancy). We regularize the router by the expected discordance:
+\begin{equation}
+\label{eq:gwroute}
+\mathcal{L}_{\text{align}} \;=\; \sum_i \sum_h \sum_m \pi_{i,h,m}\, D_{i,m}.
+\end{equation}
+
+\begin{proposition}[Gradient form and implicit baseline]
+\label{prop:reinforce}
+Let $\pi_{i,h,\cdot}$ be a softmax over logits $\ell_{i,h,\cdot}$. Then
+\[
+\frac{\partial \mathcal{L}_{\text{align}}}{\partial \ell_{i,h,m}}
+\;=\;
+\pi_{i,h,m}\Big( D_{i,m} - \sum_{k}\pi_{i,h,k}\,D_{i,k}\Big).
+\]
+\end{proposition}
+
+\begin{proof}
+Using $\frac{\partial \pi_k}{\partial \ell_m}=\pi_k(\delta_{km}-\pi_m)$ and the chain rule:
+\[
+\frac{\partial \mathcal{L}_{\text{align}}}{\partial \ell_{i,h,m}}
+=
+\sum_k D_{i,k}\frac{\partial \pi_{i,h,k}}{\partial \ell_{i,h,m}}
+=
+\sum_k D_{i,k}\,\pi_{i,h,k}(\delta_{km}-\pi_{i,h,m})
+=
+\pi_{i,h,m}\Big(D_{i,m}-\sum_k \pi_{i,h,k}D_{i,k}\Big).
+\]
+\end{proof}
+
+\section{Geometric and Numerical Critique Integrated into THORN++}
+
+\subsection{Degree--density imbalance and entropy gaming}
+
+If attention normalization is performed over the union neighborhood without compensating for view density, the router may be biased toward sparser views because they concentrate attention mass on fewer neighbors, yielding an easier low-entropy optimum unrelated to true manifold geometry. The degree-normalized mixing in \eqref{eq:routedA} mitigates this by rescaling each view operator so that the effective contribution of a view is governed by structural compatibility rather than raw neighborhood size.
+
+When per-view normalization is preferred, a density-invariant alternative computes attention separately on each view neighborhood and mixes post-softmax:
+\[
+\alpha_{ij}^{(h,m)}=\mathrm{softmax}_{j\in\mathcal{N}^{(m)}(i)}\big(s_{ij}^{(h)}+b_{ij}^{(h,m)}\big),
+\qquad
+y_i^{(h)}=\sum_m \pi_{i,h,m}\sum_{j\in\mathcal{N}^{(m)}(i)}\alpha_{ij}^{(h,m)}v_j^{(h)}.
+\]
+
+\subsection{Head collapse and geometry diversity}
+
+Without explicit incentives, the router can collapse: all heads may select the same view (often $k$NN) because it yields immediate feature smoothing and stable gradients. THORN++ incorporates diversity and load-balancing in the objective.
+
+Let $P_i\in\mathbb{R}^{H\times M}$ be the matrix whose $(h,m)$ entry is $\pi_{i,h,m}$. A head-view orthogonality penalty discourages redundant routing across heads:
+\[
+\mathcal{L}_{\text{orth}}=\lambda_{\text{orth}}\sum_i \left\lVert \frac{P_iP_i^\top}{\|P_i\|_F^2}-\frac{I_H}{H}\right\rVert_F^2.
+\]
+In addition, a global view-usage regularizer prevents batch-level collapse:
+\[
+u_m=\frac{1}{NH}\sum_{i,h}\pi_{i,h,m},
+\qquad
+\mathcal{L}_{\mathrm{lb}}=\lambda_{\mathrm{lb}}\sum_{m=1}^{M}\left(u_m-\frac{1}{M}\right)^2.
+\]
+
+\begin{remark}[Implementation reminder: squared Frobenius norm for $\mathcal{L}_{\mathrm{orth}}$]
+To match $\|\cdot\|_F^2$ exactly, ensure the Frobenius norm is \emph{squared} (or compute the elementwise square sum directly). Using an un-squared matrix norm changes the gradient geometry.
+\begin{lstlisting}[language=Python]
+# pi: [N, H, M]
+# For each i, P = pi[i] has shape [H, M]
+P = pi[i]                                     # [H, M]
+G = P @ P.T                                   # [H, H]
+den = (P * P).sum().clamp_min(eps)            # ||P||_F^2
+C = G / den - torch.eye(H, device=P.device)/H
+L_orth_i = (C * C).sum()                      # == ||C||_F^2
+
+# Alternatively:
+# L_orth_i = torch.linalg.matrix_norm(C, ord='fro').pow(2)
+\end{lstlisting}
+\end{remark}
+
+\subsection{Static vs.\ dynamic manifold signal (LID semantics)}
+
+Local intrinsic dimension (LID) computed once on raw features should be interpreted as a structural prior, not as an invariant of learned representations across layers. THORN++ therefore treats $\mathrm{LID}_i$ as an input observer signal unless a deliberate layerwise proxy is introduced and recomputed periodically (with stop-gradient through neighbor selection).
+
+\subsection{Transport alignment at scale (ego-alignment and caching)}
+
+Global fused Gromov--Wasserstein alignment is computationally prohibitive at scale. THORN++ adopts a local alignment strategy: compute transport discrepancies on ego-neighborhoods and cache them as node/edge consensus features (refreshed slowly offline). During forward passes and at inference, transport enters only as a static (or slowly updated) observer signal $D_{i,m}$.
+
+\section{THORN++ Pseudocode}
+
+Algorithm~\ref{alg:thornpp} summarizes an end-to-end THORN++ pipeline, including (i) offline multi-geometry neighborhood construction and cached alignment, and (ii) routed neighborhood attention with degree-normalized view mixing and collapse-robust regularization.
+
+\begin{algorithm}[h]
+\caption{THORN++: Transport-aligned Heterogeneous Observer-Routed Neighborhood Attention}
+\label{alg:thornpp}
+\begin{algorithmic}[1]
+\Require Raw node features $X\in\mathbb{R}^{N\times d_0}$, timestamps $t\in\mathbb{R}^{N}$ (optional), number of heads $H$, views $\mathcal{M}=\{\text{kNN},\text{time},\text{diff}\}$ with $M=|\mathcal{M}|$, depth $L$
+\Require Hyperparameters: $k$ (kNN), time window/lag parameters, diffusion scale parameters, $\epsilon>0$ (log-barrier), $\epsilon_{\deg}>0$ (degree clamp), regularization weights $\lambda_{\mathrm{orth}},\lambda_{\mathrm{lb}},\lambda_{\mathrm{gw}}$
+\Statex
+\State \textbf{Offline preprocessing (static priors and cached alignment)}
+\State Build $A^{\text{kNN}}$ and distances $d^{\text{kNN}}_{ij}$
+\State Build $A^{\text{time}}$ and edge features $d^{\text{time}}_{ij}$ (e.g., $|t_i-t_j|$)
+\State Compute diffusion coordinates/affinities, yielding $A^{\text{diff}}$ and features $d^{\text{diff}}_{ij}$
+\State Estimate $\mathrm{LID}_i$ from the base space and/or $A^{\text{kNN}}$; treat as a structural prior
+\State (Optional) Compute ego-network alignment scores between views and cache as consensus features $g_{ij}$ (no online OT at inference)
+\State Ensure self-loops in every view \emph{before} union construction and edge-feature alignment: for all $m\in\mathcal{M}$ and all $i$, set $(i,i)\in E^{(m)}$
+\State Form union edge set $E_{\mathrm{union}}=\bigcup_{m\in\mathcal{M}}E^{(m)}$ with per-view weights $A^{(m)}_{ij}$ defined on $E_{\mathrm{union}}$
+\State For each view $m$, compute degrees $\deg_i^{(m)}$ and clamp $\bar\deg_i^{(m)}\gets \max(\deg_i^{(m)},\epsilon_{\deg})$; define $\hat A_{ij}^{(m)}\gets \frac{A_{ij}^{(m)}}{\sqrt{\bar\deg_i^{(m)}\bar\deg_j^{(m)}}}$
+\State Define edge observer features $e_{ij}\gets[d^{\text{kNN}}_{ij},d^{\text{time}}_{ij},d^{\text{diff}}_{ij},\mathrm{LID}_i,\mathrm{LID}_j,g_{ij}]$
+\Statex
+\State \textbf{Training / inference (forward pass)}
+\State Initialize hidden states $H^{(0)}\gets \mathrm{Embed}(X)$
+\For{$\ell=1$ to $L$}
+    \State Compute query/key/value projections per head: $Q^{(\ell)},K^{(\ell)},V^{(\ell)}$ from $H^{(\ell-1)}$
+    \State Compute router context with an MPNN over $E_{\mathrm{union}}$: $C^{(\ell)}\gets \mathrm{MPNN}(H^{(\ell-1)},E_{\mathrm{union}},e)$
+    \State For each node $i$ and head $h$, produce routing logits $\ell_{i,h,m}^{(\ell)}$ over views $m\in\mathcal{M}$
+    \State Routing probabilities: $\pi_{i,h,m}^{(\ell)}\gets \mathrm{softmax}_{m}(\ell_{i,h,m}^{(\ell)})$
+    \State Edge bias per head: $b_{ij}^{(\ell,h)}\gets \phi_h^{(\ell)}(e_{ij})$
+    \State Degree-normalized routed mask on edges:
+    \[
+      \tilde A_{ij}^{(\ell,i,h)} \gets \sum_{m\in\mathcal{M}} \pi_{i,h,m}^{(\ell)} \, \hat A_{ij}^{(m)}
+    \]
+    \State Attention logits on $E_{\mathrm{union}}$ (edge list stores $(j\to i)$):
+    \[
+      z_{ij}^{(\ell,h)} \gets \frac{\langle q_i^{(\ell,h)},k_j^{(\ell,h)}\rangle}{\sqrt{d}} + b_{ij}^{(\ell,h)} + \log(\tilde A_{ij}^{(\ell,i,h)}+\epsilon)
+    \]
+    \State Neighborhood attention weights: $\alpha_{ij}^{(\ell,h)} \gets \mathrm{softmax}_{j:(j\to i)\in E_{\mathrm{union}}}(z_{ij}^{(\ell,h)})$
+    \State Aggregate per head: $y_i^{(\ell,h)} \gets \sum_{j:(j\to i)\in E_{\mathrm{union}}} \alpha_{ij}^{(\ell,h)} v_j^{(\ell,h)}$
+    \State Combine heads and apply residual/FFN: $H^{(\ell)}\gets \mathrm{Block}(H^{(\ell-1)},\mathrm{Concat}_h\, y^{(\ell,h)})$
+\EndFor
+\State Compute task loss $\mathcal{L}_{\mathrm{task}}$ from $H^{(L)}$
+\State Head-view orthogonality: $\mathcal{L}_{\mathrm{orth}} \gets \sum_i \big\|\frac{P_iP_i^\top}{\|P_i\|_F^2}-\frac{I_H}{H}\big\|_F^2$
+\State View load-balancing: $\mathcal{L}_{\mathrm{lb}}\gets \sum_{m=1}^{M}\left(u_m-\frac{1}{M}\right)^2$
+\State \hspace{1.5em}where $u_m=\frac{1}{NH}\sum_{i,h}\pi_{i,h,m}$
+\State (Optional) Alignment penalty: $\mathcal{L}_{\mathrm{gw}}\gets \sum_{i,h,m}\pi_{i,h,m}\,D_{i,m}$
+\State Total loss: $\mathcal{L}\gets \mathcal{L}_{\mathrm{task}} + \lambda_{\mathrm{orth}}\mathcal{L}_{\mathrm{orth}}+\lambda_{\mathrm{lb}}\mathcal{L}_{\mathrm{lb}}+\lambda_{\mathrm{gw}}\mathcal{L}_{\mathrm{gw}}$
+\State Update parameters by backpropagation.
+\end{algorithmic}
+\end{algorithm}
+
+\section*{References (to be completed)}
+Include citations for: Transformer attention; GAT; Graphormer; MoE/Switch routing; diffusion maps; LID estimation; FGW/GW for graphs.
+
+\end{document}
