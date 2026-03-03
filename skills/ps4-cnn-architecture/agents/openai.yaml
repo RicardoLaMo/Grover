@@ -1,4 +1,0 @@
-interface:
-  display_name: "PS4 CNN Architecture"
-  short_description: "Use architecture patterns and model constraints for PS4."
-  default_prompt: "Use this skill to select, implement, and evaluate CNN architectures for PS4."

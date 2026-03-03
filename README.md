@@ -1,77 +1,73 @@
-# THORN
+# GROVER
 
-Transport-aligned Heterogeneous Observer-Routed Neighborhood Attention (`THORN`) is a graph-attention framework that routes heads using geometric observers (e.g., curvature, intrinsic dimension, density) instead of content-only gating.
+Geometric Observer-Routed View-aware Edge Reasoning (`GROVER`) is the project framing used in this repository for geometric observer routing in multi-view graph attention.
 
-This repository contains the PyTorch implementation, experiment scripts, and reproducibility checks used in the THORN project.
+## Why the Abbreviation GROVER
+`GROVER` emphasizes what the method does:
+- `G`: Geometric signals drive routing.
+- `RO`: Observer-routed decision layer selects useful views.
+- `VER`: View-aware edge reasoning integrates multi-view neighborhood evidence.
+
+The paper source currently uses `GoRA` as a method macro (`Geometric Observer-Routed Attention`). In this repository, `GROVER` is used as the broader project name for the same core idea plus its practical multi-view edge reasoning pipeline.
 
 ## Introduction
-- Problem: content-only graph attention underuses graph geometry.
-- Core idea: observer-routed, multi-view attention with differentiable structural masking.
-- Goal: improve robustness and performance under view drift and class imbalance.
+- Multi-view graphs create a routing challenge: when to isolate views and when to let them interact.
+- The method routes attention using geometry (curvature, intrinsic dimension, density), not only content features.
+
+## The Isolation-Interaction Tradeoff
+- Formalizes pre-softmax (interaction) versus post-softmax (isolation) view mixing.
+- Shows each mode wins under different signal and overlap regimes.
+
+### Setup
+- Defines view neighborhoods, overlap ratio, and per-view signal quality.
+
+### Two Mixing Modes
+- Interaction mode: merge views before normalization for cross-view reinforcement.
+- Isolation mode: normalize per view, then combine for robustness to noisy views.
+
+### When Each Mode Dominates
+- Mode preference depends on view SNR and neighborhood overlap.
+
+## Observer-Routed Multi-View Attention
+- Geometry observers produce routing features.
+- Router assigns view weights per node/head.
+- Differentiable masking relaxes hard graph constraints.
+
+### Notation
+### The Observer Layer: Geometric Perception
+### Multi-View Graph Construction
+### MoE-Style Observer Routing
+### Log-Barrier Differentiable Masking
+### Instantiating the Tradeoff
+### Cross-View Alignment
+### Block Architecture and Regularization
 
 ## Related Work
-- Graph neural networks and graph transformers.
-- Mixture-of-experts style routing.
-- Optimal transport and fused Gromov-Wasserstein alignment.
-- Geometric descriptors (LID, curvature, LOF).
-- Low-rank adaptation for parameter-efficient view specialization.
-
-## THORN Architecture
-Main components (from `thorn/paper/thorn_paper.tex`):
-- Preliminaries and notation.
-- Observer features.
-- Multi-view graph construction.
-- MoE-style observer routing.
-- Log-barrier masking.
-- Pre-softmax vs. post-softmax view mixing.
-- Fused Gromov-Wasserstein cross-view alignment.
-- THORNBlock architecture.
-- Regularizers.
-- End-to-end algorithm.
-
-## Theoretical Analysis
-- Formal properties of routing/masking behavior.
-- Subsumption perspective (connections to GAT/Graphormer/MoE settings).
-- Isolation-versus-interaction tradeoff framing for view mixing.
+- Graph attention and graph transformers.
+- Mixture-of-experts routing.
+- Geometric descriptors and alignment methods.
 
 ## Experiments
-Evaluation sections include:
-- Experimental setup.
-- Drift-strength experiment.
-- Ablation study.
-- Routing analysis.
-- Theory versus practice.
-- Baseline comparison.
-- Log-barrier stability study.
-- THORN++ evaluation.
-- Observer orthogonality analysis.
+- Setup.
+- Drift-strength tradeoff study.
+- Observer necessity and component ablations.
+- Routing analysis and stability checks.
+- Negative results and bottleneck analysis.
+
+### Setup
+### The Tradeoff in Action: Drift-Strength Experiment
+### Geometric Observers are Essential
+### Component Ablation
+### Routing Analysis
+### Log-Barrier Stability
+### Negative Results: Capacity vs. Bottleneck
+
+## Practitioner's Guide: Choosing the Attention Mode
+- Use interaction mode when complementary views reinforce one another.
+- Use isolation mode when one view is much cleaner than the others.
 
 ## Discussion
-- Practical lessons from observer routing and multi-view mixing.
-- Failure modes, stability constraints, and deployment tradeoffs.
+- Practical deployment tradeoffs and failure modes.
 
-## Conclusion and Future Work
-- THORN benefits from geometry-aware routing and differentiable structural control.
-- Future directions include stronger scalable alignment, online proxies, and broader benchmarks.
-
-## Quickstart
-
-Run environment checks:
-```bash
-bash scripts/stage1_verify.sh
-```
-
-Run THORN smoke:
-```bash
-bash scripts/run_thorn.sh --smoke
-```
-
-Run THORN full:
-```bash
-bash scripts/run_thorn.sh --full
-```
-
-Run baselines and comparison:
-```bash
-bash scripts/run_baselines.sh
-```
+## Conclusion
+- Geometry-aware observer routing gives a principled control knob for multi-view attention behavior.

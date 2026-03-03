@@ -1,4 +1,3 @@
-# Python caches and tooling
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -6,34 +5,27 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 
-# Virtual environments
 .venv/
 venv/
 env/
 
-# OS/editor noise
 .DS_Store
 *.swp
 *.swo
 .git_stale_*/
 
-# Logs and runtime artifacts
 *.log
 *.tmp
 
-# LaTeX build artifacts
 *.aux
 *.out
 *.toc
 *.bbl
 *.blg
 
-# Generated project outputs (large and reproducible from scripts)
 artifacts/
 output/
-data/
 
-# Local dataset and heavy binaries
 *.npy
 *.npz
 *.pt
@@ -41,7 +33,3 @@ data/
 *.ckpt
 *.onnx
 *.h5
-
-# Local assignment resources
-DSCI552_problem_set04-1.pdf
-ps4_*_labels.csv

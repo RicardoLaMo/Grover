@@ -1,4 +1,0 @@
-interface:
-  display_name: "PS4 Grading Gates"
-  short_description: "Use grading gates and rubric checks for PS4 deliverables."
-  default_prompt: "Use this skill to enforce rubric-aligned quality gates for PS4 code and report outputs."
